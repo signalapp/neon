@@ -1,10 +1,11 @@
-use neon_runtime::raw::Env;
-use neon_runtime::tsfn::ThreadsafeFunction;
+use std::sync::{Arc, RwLock};
 
+use crate::context::internal::ContextInternal;
 use crate::context::{Context, TaskContext};
+#[cfg(feature = "napi-6")]
+use crate::lifecycle::InstanceData;
 use crate::result::NeonResult;
-
-type Callback = Box<dyn FnOnce(Env) + Send + 'static>;
+use crate::trampoline::ThreadsafeTrampoline;
 
 /// Queue for scheduling Rust closures to execute on the JavaScript main thread.
 ///
@@ -50,7 +51,7 @@ type Callback = Box<dyn FnOnce(Env) + Send + 'static>;
 /// ```
 
 pub struct EventQueue {
-    tsfn: ThreadsafeFunction<Callback>,
+    trampoline: Arc<RwLock<ThreadsafeTrampoline>>,
     has_ref: bool,
 }
 
@@ -64,20 +65,32 @@ impl EventQueue {
     /// Creates an unbounded queue for scheduling closures on the JavaScript
     /// main thread
     pub fn new<'a, C: Context<'a>>(cx: &mut C) -> Self {
-        let tsfn = unsafe { ThreadsafeFunction::new(cx.env().to_raw(), Self::callback) };
+        #[cfg(feature = "napi-6")]
+        let trampoline = InstanceData::threadsafe_trampoline(cx);
 
-        Self {
-            tsfn,
-            has_ref: true,
-        }
+        #[cfg(not(feature = "napi-6"))]
+        let trampoline = ThreadsafeTrampoline::new(env);
+
+        let mut queue = Self {
+            trampoline: trampoline,
+            has_ref: false,
+        };
+
+        // Start referenced
+        queue.reference(cx);
+
+        queue
     }
 
     /// Allow the Node event loop to exit while this `EventQueue` exists.
     /// _Idempotent_
     pub fn unref<'a, C: Context<'a>>(&mut self, cx: &mut C) -> &mut Self {
-        self.has_ref = false;
+        if !self.has_ref {
+            return self;
+        }
 
-        unsafe { self.tsfn.unref(cx.env().to_raw()) }
+        self.has_ref = false;
+        self.trampoline.write().unwrap().unref(cx.env().to_raw());
 
         self
     }
@@ -85,9 +98,15 @@ impl EventQueue {
     /// Prevent the Node event loop from exiting while this `EventQueue` exists. (Default)
     /// _Idempotent_
     pub fn reference<'a, C: Context<'a>>(&mut self, cx: &mut C) -> &mut Self {
-        self.has_ref = true;
+        if self.has_ref {
+            return self;
+        }
 
-        unsafe { self.tsfn.reference(cx.env().to_raw()) }
+        self.has_ref = true;
+        self.trampoline
+            .write()
+            .unwrap()
+            .reference(cx.env().to_raw());
 
         self
     }
@@ -107,17 +126,8 @@ impl EventQueue {
     where
         F: FnOnce(TaskContext) -> NeonResult<()> + Send + 'static,
     {
-        let callback = Box::new(move |env| {
-            let env = unsafe { std::mem::transmute(env) };
-
-            // Note: It is sufficient to use `TaskContext`'s `InheritedHandleScope` because
-            // N-API creates a `HandleScope` before calling the callback.
-            TaskContext::with_context(env, move |cx| {
-                let _ = f(cx);
-            });
-        });
-
-        self.tsfn.call(callback, None).map_err(|_| EventQueueError)
+        let trampoline = self.trampoline.read().unwrap();
+        trampoline.try_send(f).map_err(|_| EventQueueError)
     }
 
     /// Returns a boolean indicating if this `EventQueue` will prevent the Node event
@@ -125,16 +135,20 @@ impl EventQueue {
     pub fn has_ref(&self) -> bool {
         self.has_ref
     }
+}
 
-    // Monomorphized trampoline funciton for calling the user provided closure
-    fn callback(env: Option<Env>, callback: Callback) {
-        if let Some(env) = env {
-            callback(env);
-        } else {
-            crate::context::internal::IS_RUNNING.with(|v| {
-                *v.borrow_mut() = false;
-            });
+impl Drop for EventQueue {
+    fn drop(&mut self) {
+        if !self.has_ref {
+            return;
         }
+
+        let trampoline = self.trampoline.clone();
+
+        self.send(move |cx| {
+            trampoline.write().unwrap().unref(cx.env().to_raw());
+            Ok(())
+        });
     }
 }
 

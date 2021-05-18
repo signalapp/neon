@@ -10,6 +10,8 @@
 
 use std::mem;
 use std::sync::Arc;
+#[cfg(feature = "event-queue-api")]
+use std::sync::RwLock;
 
 use neon_runtime::raw::Env;
 use neon_runtime::reference;
@@ -17,6 +19,8 @@ use neon_runtime::tsfn::ThreadsafeFunction;
 
 use crate::context::Context;
 use crate::handle::root::NapiRef;
+#[cfg(feature = "event-queue-api")]
+use crate::trampoline::ThreadsafeTrampoline;
 
 /// `InstanceData` holds Neon data associated with a particular instance of a
 /// native module. If a module is loaded multiple times (e.g., worker threads), this
@@ -30,6 +34,10 @@ pub(crate) struct InstanceData {
     /// given the cost of FFI, this optimization is omitted until the cost of an
     /// `Arc` is demonstrated as significant.
     drop_queue: Arc<ThreadsafeFunction<NapiRef>>,
+
+    /// Used in EventQueue to invoke Rust callbacks with Napi environment.
+    #[cfg(feature = "event-queue-api")]
+    threadsafe_trampoline: Arc<RwLock<ThreadsafeTrampoline>>,
 }
 
 fn drop_napi_ref(env: Option<Env>, data: NapiRef) {
@@ -62,8 +70,18 @@ impl InstanceData {
             queue
         };
 
+        #[cfg(feature = "event-queue-api")]
+        let threadsafe_trampoline = {
+            let mut trampoline = ThreadsafeTrampoline::new(env);
+            trampoline.unref(env);
+            trampoline
+        };
+
         let data = InstanceData {
             drop_queue: Arc::new(drop_queue),
+
+            #[cfg(feature = "event-queue-api")]
+            threadsafe_trampoline: Arc::new(RwLock::new(threadsafe_trampoline)),
         };
 
         unsafe { &mut *neon_runtime::lifecycle::set_instance_data(env, data) }
@@ -72,5 +90,13 @@ impl InstanceData {
     /// Helper to return a reference to the `drop_queue` field of `InstanceData`
     pub(crate) fn drop_queue<'a, C: Context<'a>>(cx: &mut C) -> Arc<ThreadsafeFunction<NapiRef>> {
         Arc::clone(&InstanceData::get(cx).drop_queue)
+    }
+
+    /// Helper to return a reference to the `invoke_callback` field of `InstanceData`
+    #[cfg(feature = "event-queue-api")]
+    pub(crate) fn threadsafe_trampoline<'a, C: Context<'a>>(
+        cx: &mut C,
+    ) -> Arc<RwLock<ThreadsafeTrampoline>> {
+        Arc::clone(&InstanceData::get(cx).threadsafe_trampoline)
     }
 }

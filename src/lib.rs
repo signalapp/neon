@@ -106,6 +106,9 @@ pub use neon_macros::*;
 #[cfg(feature = "napi-6")]
 mod lifecycle;
 
+#[cfg(all(feature = "napi-4", feature = "event-queue-api"))]
+mod trampoline;
+
 #[cfg(all(feature = "legacy-runtime", feature = "napi-1"))]
 compile_error!("Cannot enable both `legacy-runtime` and `napi-*` features.\n\nTo use `napi-*`, disable `legacy-runtime` by setting `default-features` to `false` in Cargo.toml\nor with cargo's --no-default-features flag.");
 
