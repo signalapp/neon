@@ -1,10 +1,9 @@
-use neon_runtime::raw::Env;
-use neon_runtime::tsfn::ThreadsafeFunction;
+use std::sync::{Arc, RwLock};
 
+use crate::context::internal::ContextInternal;
 use crate::context::{Context, TaskContext};
 use crate::result::NeonResult;
-
-type Callback = Box<dyn FnOnce(Env) + Send + 'static>;
+use crate::trampoline::ThreadsafeTrampoline;
 
 /// Queue for scheduling Rust closures to execute on the JavaScript main thread.
 ///
@@ -50,8 +49,9 @@ type Callback = Box<dyn FnOnce(Env) + Send + 'static>;
 /// ```
 
 pub struct EventQueue {
-    tsfn: ThreadsafeFunction<Callback>,
+    trampoline: Arc<RwLock<ThreadsafeTrampoline>>,
     has_ref: bool,
+    has_shared_trampoline: bool,
 }
 
 impl std::fmt::Debug for EventQueue {
@@ -64,20 +64,43 @@ impl EventQueue {
     /// Creates an unbounded queue for scheduling closures on the JavaScript
     /// main thread
     pub fn new<'a, C: Context<'a>>(cx: &mut C) -> Self {
-        let tsfn = unsafe { ThreadsafeFunction::new(cx.env().to_raw(), Self::callback) };
+        let trampoline = ThreadsafeTrampoline::new(cx.env().to_raw());
 
         Self {
-            tsfn,
+            trampoline: Arc::new(RwLock::new(trampoline)),
             has_ref: true,
+            has_shared_trampoline: false,
+        }
+    }
+
+    pub(crate) fn with_shared_trampoline<'a, C: Context<'a>>(
+        cx: &mut C,
+        trampoline: Arc<RwLock<ThreadsafeTrampoline>>,
+    ) -> Self {
+        trampoline
+            .write()
+            .unwrap()
+            .increment_references(cx.env().to_raw());
+
+        Self {
+            trampoline: trampoline,
+            has_ref: true,
+            has_shared_trampoline: true,
         }
     }
 
     /// Allow the Node event loop to exit while this `EventQueue` exists.
     /// _Idempotent_
     pub fn unref<'a, C: Context<'a>>(&mut self, cx: &mut C) -> &mut Self {
-        self.has_ref = false;
+        if !self.has_ref {
+            return self;
+        }
 
-        unsafe { self.tsfn.unref(cx.env().to_raw()) }
+        self.has_ref = false;
+        self.trampoline
+            .write()
+            .unwrap()
+            .decrement_references(cx.env().to_raw());
 
         self
     }
@@ -85,9 +108,15 @@ impl EventQueue {
     /// Prevent the Node event loop from exiting while this `EventQueue` exists. (Default)
     /// _Idempotent_
     pub fn reference<'a, C: Context<'a>>(&mut self, cx: &mut C) -> &mut Self {
-        self.has_ref = true;
+        if self.has_ref {
+            return self;
+        }
 
-        unsafe { self.tsfn.reference(cx.env().to_raw()) }
+        self.has_ref = true;
+        self.trampoline
+            .write()
+            .unwrap()
+            .increment_references(cx.env().to_raw());
 
         self
     }
@@ -107,17 +136,8 @@ impl EventQueue {
     where
         F: FnOnce(TaskContext) -> NeonResult<()> + Send + 'static,
     {
-        let callback = Box::new(move |env| {
-            let env = unsafe { std::mem::transmute(env) };
-
-            // Note: It is sufficient to use `TaskContext`'s `InheritedHandleScope` because
-            // N-API creates a `HandleScope` before calling the callback.
-            TaskContext::with_context(env, move |cx| {
-                let _ = f(cx);
-            });
-        });
-
-        self.tsfn.call(callback, None).map_err(|_| EventQueueError)
+        let trampoline = self.trampoline.read().unwrap();
+        trampoline.try_send(f).map_err(|_| EventQueueError)
     }
 
     /// Returns a boolean indicating if this `EventQueue` will prevent the Node event
@@ -125,16 +145,29 @@ impl EventQueue {
     pub fn has_ref(&self) -> bool {
         self.has_ref
     }
+}
 
-    // Monomorphized trampoline funciton for calling the user provided closure
-    fn callback(env: Option<Env>, callback: Callback) {
-        if let Some(env) = env {
-            callback(env);
-        } else {
-            crate::context::internal::IS_RUNNING.with(|v| {
-                *v.borrow_mut() = false;
-            });
+impl Drop for EventQueue {
+    fn drop(&mut self) {
+        if !self.has_ref {
+            return;
         }
+
+        // If we own the trampoline - it is going to be dropped as well.
+        // There is no need to decrement its references.
+        if !self.has_shared_trampoline {
+            return;
+        }
+
+        let trampoline = self.trampoline.clone();
+
+        self.send(move |cx| {
+            trampoline
+                .write()
+                .unwrap()
+                .decrement_references(cx.env().to_raw());
+            Ok(())
+        });
     }
 }
 
