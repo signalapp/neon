@@ -46,7 +46,7 @@ impl ThreadsafeTrampoline {
     /// References a trampoline to prevent exiting the event loop until it has been dropped. (Default)
     /// Safety: `Env` must be valid for the current thread
     /// _Not idempotent_
-    pub(crate) fn reference(&mut self, env: Env) {
+    pub(crate) fn increment_references(&mut self, env: Env) {
         self.ref_count += 1;
         if self.ref_count != 1 {
             return;
@@ -59,9 +59,9 @@ impl ThreadsafeTrampoline {
     /// Unreferences a trampoline to allow exiting the event loop before it has been dropped.
     /// Safety: `Env` must be valid for the current thread
     /// _Not idempotent_
-    pub(crate) fn unref(&mut self, env: Env) {
+    pub(crate) fn decrement_references(&mut self, env: Env) {
         if self.ref_count == 0 {
-            return;
+            panic!("ThreadsafeTrampoline reference underflow");
         }
         self.ref_count -= 1;
 
@@ -73,7 +73,7 @@ impl ThreadsafeTrampoline {
         }
     }
 
-    // Monomorphized trampoline funciton for calling the user provided closure
+    // Monomorphized trampoline function for calling the user provided closure
     fn callback(env: Option<Env>, callback: Callback) {
         if let Some(env) = env {
             callback(env);

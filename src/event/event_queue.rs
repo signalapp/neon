@@ -51,6 +51,7 @@ use crate::trampoline::ThreadsafeTrampoline;
 pub struct EventQueue {
     trampoline: Arc<RwLock<ThreadsafeTrampoline>>,
     has_ref: bool,
+    has_shared_trampoline: bool,
 }
 
 impl std::fmt::Debug for EventQueue {
@@ -63,24 +64,29 @@ impl EventQueue {
     /// Creates an unbounded queue for scheduling closures on the JavaScript
     /// main thread
     pub fn new<'a, C: Context<'a>>(cx: &mut C) -> Self {
-        let trampoline = Arc::new(RwLock::new(ThreadsafeTrampoline::new(cx.env().to_raw())));
+        let trampoline = ThreadsafeTrampoline::new(cx.env().to_raw());
 
-        Self::with_trampoline(cx, trampoline)
+        Self {
+            trampoline: Arc::new(RwLock::new(trampoline)),
+            has_ref: true,
+            has_shared_trampoline: false,
+        }
     }
 
-    pub(crate) fn with_trampoline<'a, C: Context<'a>>(
+    pub(crate) fn with_shared_trampoline<'a, C: Context<'a>>(
         cx: &mut C,
         trampoline: Arc<RwLock<ThreadsafeTrampoline>>,
     ) -> Self {
-        let mut queue = Self {
+        trampoline
+            .write()
+            .unwrap()
+            .increment_references(cx.env().to_raw());
+
+        Self {
             trampoline: trampoline,
-            has_ref: false,
-        };
-
-        // Start referenced
-        queue.reference(cx);
-
-        queue
+            has_ref: true,
+            has_shared_trampoline: true,
+        }
     }
 
     /// Allow the Node event loop to exit while this `EventQueue` exists.
@@ -91,7 +97,10 @@ impl EventQueue {
         }
 
         self.has_ref = false;
-        self.trampoline.write().unwrap().unref(cx.env().to_raw());
+        self.trampoline
+            .write()
+            .unwrap()
+            .decrement_references(cx.env().to_raw());
 
         self
     }
@@ -107,7 +116,7 @@ impl EventQueue {
         self.trampoline
             .write()
             .unwrap()
-            .reference(cx.env().to_raw());
+            .increment_references(cx.env().to_raw());
 
         self
     }
@@ -144,10 +153,19 @@ impl Drop for EventQueue {
             return;
         }
 
+        // If we own the trampoline - it is going to be dropped as well.
+        // There is no need to decrement its references.
+        if !self.has_shared_trampoline {
+            return;
+        }
+
         let trampoline = self.trampoline.clone();
 
         self.send(move |cx| {
-            trampoline.write().unwrap().unref(cx.env().to_raw());
+            trampoline
+                .write()
+                .unwrap()
+                .decrement_references(cx.env().to_raw());
             Ok(())
         });
     }

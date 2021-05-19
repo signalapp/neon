@@ -561,12 +561,16 @@ pub trait Context<'a>: ContextInternal<'a> {
     /// Creates an unbounded queue of events to be executed on a JavaScript thread
     fn queue(&mut self) -> EventQueue {
         #[cfg(feature = "napi-6")]
-        let trampoline = InstanceData::threadsafe_trampoline(self);
+        let shared_trampoline = InstanceData::threadsafe_trampoline(self);
 
         #[cfg(not(feature = "napi-6"))]
-        let trampoline = ThreadsafeTrampoline::new(self.env());
+        let shared_trampoline = {
+            let shared_trampoline = ThreadsafeTrampoline::new(self.env());
+            shared_trampoline.unref(self.env().to_raw());
+            shared_trampoline
+        };
 
-        EventQueue::with_trampoline(self, trampoline)
+        EventQueue::with_shared_trampoline(self, shared_trampoline)
     }
 }
 

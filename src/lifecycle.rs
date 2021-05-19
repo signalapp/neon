@@ -73,7 +73,7 @@ impl InstanceData {
         #[cfg(feature = "event-queue-api")]
         let threadsafe_trampoline = {
             let mut trampoline = ThreadsafeTrampoline::new(env);
-            trampoline.unref(env);
+            trampoline.decrement_references(env);
             trampoline
         };
 
