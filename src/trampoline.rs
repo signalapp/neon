@@ -60,9 +60,10 @@ impl ThreadsafeTrampoline {
     /// Safety: `Env` must be valid for the current thread
     /// _Not idempotent_
     pub(crate) fn decrement_references(&mut self, env: Env) {
-        if self.ref_count == 0 {
-            panic!("ThreadsafeTrampoline reference underflow");
-        }
+        assert!(
+            self.ref_count > 0,
+            "ThreadsafeTrampoline reference underflow"
+        );
         self.ref_count -= 1;
 
         if self.ref_count != 0 {
