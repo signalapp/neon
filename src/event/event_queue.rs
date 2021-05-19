@@ -2,8 +2,6 @@ use std::sync::{Arc, RwLock};
 
 use crate::context::internal::ContextInternal;
 use crate::context::{Context, TaskContext};
-#[cfg(feature = "napi-6")]
-use crate::lifecycle::InstanceData;
 use crate::result::NeonResult;
 use crate::trampoline::ThreadsafeTrampoline;
 
@@ -65,12 +63,15 @@ impl EventQueue {
     /// Creates an unbounded queue for scheduling closures on the JavaScript
     /// main thread
     pub fn new<'a, C: Context<'a>>(cx: &mut C) -> Self {
-        #[cfg(feature = "napi-6")]
-        let trampoline = InstanceData::threadsafe_trampoline(cx);
+        let trampoline = Arc::new(RwLock::new(ThreadsafeTrampoline::new(cx.env().to_raw())));
 
-        #[cfg(not(feature = "napi-6"))]
-        let trampoline = ThreadsafeTrampoline::new(env);
+        Self::with_trampoline(cx, trampoline)
+    }
 
+    pub(crate) fn with_trampoline<'a, C: Context<'a>>(
+        cx: &mut C,
+        trampoline: Arc<RwLock<ThreadsafeTrampoline>>,
+    ) -> Self {
         let mut queue = Self {
             trampoline: trampoline,
             has_ref: false,
