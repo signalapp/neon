@@ -186,6 +186,12 @@ use std::convert::Into;
 use std::marker::PhantomData;
 use std::os::raw::c_void;
 use std::panic::UnwindSafe;
+#[cfg(all(
+    feature = "napi-4",
+    not(feature = "napi-6"),
+    feature = "event-queue-api"
+))]
+use std::sync::{Arc, RwLock};
 
 use self::internal::{ContextInternal, Scope, ScopeMetadata};
 
@@ -565,9 +571,9 @@ pub trait Context<'a>: ContextInternal<'a> {
 
         #[cfg(not(feature = "napi-6"))]
         let shared_trampoline = {
-            let shared_trampoline = ThreadsafeTrampoline::new(self.env().to_raw());
-            shared_trampoline.decrement_references(self.env().to_raw());
-            shared_trampoline
+            let mut trampoline = ThreadsafeTrampoline::new(self.env().to_raw());
+            trampoline.decrement_references(self.env().to_raw());
+            Arc::new(RwLock::new(trampoline))
         };
 
         EventQueue::with_shared_trampoline(self, shared_trampoline)
