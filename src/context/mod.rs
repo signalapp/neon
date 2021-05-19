@@ -566,7 +566,7 @@ pub trait Context<'a>: ContextInternal<'a> {
         #[cfg(not(feature = "napi-6"))]
         let shared_trampoline = {
             let shared_trampoline = ThreadsafeTrampoline::new(self.env());
-            shared_trampoline.unref(self.env().to_raw());
+            shared_trampoline.decrement_references(self.env().to_raw());
             shared_trampoline
         };
 
