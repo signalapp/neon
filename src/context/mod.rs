@@ -154,10 +154,18 @@ use crate::context::internal::Env;
 #[cfg(all(feature = "napi-4", feature = "event-queue-api"))]
 use crate::event::EventQueue;
 use crate::handle::{Handle, Managed};
+#[cfg(all(feature = "napi-6", feature = "event-queue-api"))]
+use crate::lifecycle::InstanceData;
 #[cfg(feature = "legacy-runtime")]
 use crate::object::class::Class;
 use crate::object::{Object, This};
 use crate::result::{JsResult, NeonResult, Throw};
+#[cfg(all(
+    feature = "napi-4",
+    not(feature = "napi-6"),
+    feature = "event-queue-api"
+))]
+use crate::trampoline::ThreadsafeTrampoline;
 use crate::types::binary::{JsArrayBuffer, JsBuffer};
 #[cfg(feature = "napi-1")]
 use crate::types::boxed::{Finalize, JsBox};
@@ -178,6 +186,12 @@ use std::convert::Into;
 use std::marker::PhantomData;
 use std::os::raw::c_void;
 use std::panic::UnwindSafe;
+#[cfg(all(
+    feature = "napi-4",
+    not(feature = "napi-6"),
+    feature = "event-queue-api"
+))]
+use std::sync::{Arc, RwLock};
 
 use self::internal::{ContextInternal, Scope, ScopeMetadata};
 
@@ -552,7 +566,17 @@ pub trait Context<'a>: ContextInternal<'a> {
     #[cfg(all(feature = "napi-4", feature = "event-queue-api"))]
     /// Creates an unbounded queue of events to be executed on a JavaScript thread
     fn queue(&mut self) -> EventQueue {
-        EventQueue::new(self)
+        #[cfg(feature = "napi-6")]
+        let shared_trampoline = InstanceData::threadsafe_trampoline(self);
+
+        #[cfg(not(feature = "napi-6"))]
+        let shared_trampoline = {
+            let mut trampoline = ThreadsafeTrampoline::new(self.env().to_raw());
+            trampoline.decrement_references(self.env().to_raw());
+            Arc::new(RwLock::new(trampoline))
+        };
+
+        EventQueue::with_shared_trampoline(self, shared_trampoline)
     }
 }
 

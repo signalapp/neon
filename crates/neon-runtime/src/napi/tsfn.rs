@@ -2,6 +2,7 @@
 
 use std::ffi::c_void;
 use std::mem::MaybeUninit;
+use std::sync::{Arc, Mutex};
 
 use crate::napi::bindings as napi;
 use crate::raw::{Env, Local};
@@ -34,6 +35,7 @@ unsafe impl Sync for Tsfn {}
 /// function for scheduling tasks to execute on a JavaScript thread.
 pub struct ThreadsafeFunction<T> {
     tsfn: Tsfn,
+    is_finalized: Arc<Mutex<bool>>,
     callback: fn(Option<Env>, T),
 }
 
@@ -76,6 +78,7 @@ impl<T: Send + 'static> ThreadsafeFunction<T> {
         callback: fn(Option<Env>, T),
     ) -> Self {
         let mut result = MaybeUninit::uninit();
+        let is_finalized = Arc::new(Mutex::new(false));
 
         assert_eq!(
             napi::create_threadsafe_function(
@@ -87,8 +90,8 @@ impl<T: Send + 'static> ThreadsafeFunction<T> {
                 // Always set the reference count to 1. Prefer using
                 // Rust `Arc` to maintain the struct.
                 1,
-                std::ptr::null_mut(),
-                None,
+                Arc::into_raw(is_finalized.clone()) as *mut _,
+                Some(Self::finalize),
                 std::ptr::null_mut(),
                 Some(Self::callback),
                 result.as_mut_ptr(),
@@ -98,6 +101,7 @@ impl<T: Send + 'static> ThreadsafeFunction<T> {
 
         Self {
             tsfn: Tsfn(result.assume_init()),
+            is_finalized: is_finalized,
             callback,
         }
     }
@@ -149,6 +153,14 @@ impl<T: Send + 'static> ThreadsafeFunction<T> {
         );
     }
 
+    // Provides a C ABI wrapper for a napi callback notifying us about tsfn
+    // being finalized.
+    unsafe extern "C" fn finalize(_env: Env, data: *mut c_void, _hint: *mut c_void) {
+        let is_finalized = Arc::from_raw(data as *mut Mutex<bool>);
+
+        *is_finalized.lock().unwrap() = true;
+    }
+
     // Provides a C ABI wrapper for invoking the user supplied function pointer
     unsafe extern "C" fn callback(
         env: Env,
@@ -167,6 +179,12 @@ impl<T: Send + 'static> ThreadsafeFunction<T> {
 
 impl<T> Drop for ThreadsafeFunction<T> {
     fn drop(&mut self) {
+        // tsfn was already finalized by `Environment::CleanupHandles()` in
+        // Node.js
+        if *self.is_finalized.lock().unwrap() {
+            return;
+        }
+
         unsafe {
             napi::release_threadsafe_function(
                 self.tsfn.0,
